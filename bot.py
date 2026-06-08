@@ -126,7 +126,17 @@ async def processar_reacao(payload, adicionar):
     
     canal = bot.get_channel(payload.channel_id)
     mensagem = await canal.fetch_message(payload.message_id)
-    membro = bot.get_user(payload.user_id) or await bot.fetch_user(payload.user_id)
+    
+    # --- A MUDANÇA PRINCIPAL ESTÁ AQUI ---
+    # Busca o servidor (guild) e depois o membro específico dentro dele
+    guild = bot.get_guild(payload.guild_id)
+    membro = guild.get_member(payload.user_id)
+    if not membro:
+        membro = await guild.fetch_member(payload.user_id)
+    
+    # O display_name de um 'Member' prioriza o Apelido no Servidor. 
+    # Se ele não tiver um apelido, cai pro nome global padrão automaticamente.
+    nome_jogador = membro.display_name
     
     # --- LÓGICA DE BANCO DE DADOS ---
     presenca_ref = db.collection('presencas_pvp').document(data_evento.replace('/', '-')).collection('slots').document(horario_selecionado)
@@ -134,10 +144,10 @@ async def processar_reacao(payload, adicionar):
     
     jogadores = doc.to_dict().get('jogadores', []) if doc.exists else []
 
-    if adicionar and membro.display_name not in jogadores:
-        jogadores.append(membro.display_name)
-    elif not adicionar and membro.display_name in jogadores:
-        jogadores.remove(membro.display_name)
+    if adicionar and nome_jogador not in jogadores:
+        jogadores.append(nome_jogador)
+    elif not adicionar and nome_jogador in jogadores:
+        jogadores.remove(nome_jogador)
         
     presenca_ref.set({'jogadores': jogadores})
 
@@ -146,7 +156,6 @@ async def processar_reacao(payload, adicionar):
     novo_embed = discord.Embed(title=embed.title, description=embed.description, color=embed.color)
     novo_embed.set_footer(text=embed.footer.text)
 
-    # Reconstrói a lista refazendo todos os campos
     for index, (emoji, horario) in enumerate(HORARIOS.items()):
         if horario == horario_selecionado:
             texto_jogadores = "\n".join(jogadores) if jogadores else "Nenhum jogador"
