@@ -1,19 +1,18 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import firebase_admin
 from firebase_admin import credentials, firestore
-from datetime import datetime
+import datetime
 import os
 from dotenv import load_dotenv
-
-# --- CARREGAR VARIÁVEIS DE AMBIENTE (Segurança) ---
-load_dotenv()
-
-# --- SISTEMA DE SERVIDOR WEB (Para o Render não derrubar o bot) ---
 import http.server
 import socketserver
 from threading import Thread
 
+# --- CARREGAR VARIÁVEIS DE AMBIENTE ---
+load_dotenv()
+
+# --- SISTEMA DE SERVIDOR WEB (Para o Render) ---
 def iniciar_servidor_web():
     porta = int(os.environ.get('PORT', 8080))
     class MeuHandler(http.server.SimpleHTTPRequestHandler):
@@ -27,15 +26,15 @@ def iniciar_servidor_web():
     with socketserver.TCPServer(("", porta), MeuHandler) as httpd:
         httpd.serve_forever()
 
-# Inicia o servidor web falso em segundo plano
 Thread(target=iniciar_servidor_web, daemon=True).start()
 
 # --- CONFIGURAÇÕES FIXAS ---
-# Substitua o número abaixo pelo ID real do canal de PvP do seu servidor
-ID_CANAL_PVP = 1513669911782883528 
+ID_CANAL_PVP = 123456789012345678 # <--- LEMBRE-SE DE COLOCAR O SEU ID AQUI NOVAMENTE
+
+# Fuso horário do Brasil (UTC-3) para o reset diário
+FUSO_BR = datetime.timezone(datetime.timedelta(hours=-3))
 
 # --- INICIALIZAÇÃO DO FIREBASE ---
-# O Render lerá o arquivo 'firebase-key.json' que você vai criar em "Secret Files"
 cred = credentials.Certificate('firebase-key.json')
 firebase_admin.initialize_app(cred)
 db = firestore.client()
@@ -48,31 +47,36 @@ intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Dicionário de 16 horários e reações (Letras A até P)
+# Dicionário atualizado: Intervalos de 2 horas (12 faixas)
 HORARIOS = {
-    "🇦": "08:00 - 09:00", "🇧": "09:00 - 10:00", "🇨": "10:00 - 11:00",
-    "🇩": "11:00 - 12:00", "🇪": "12:00 - 13:00", "🇫": "13:00 - 14:00",
-    "🇬": "14:00 - 15:00", "🇭": "15:00 - 16:00", "🇮": "16:00 - 17:00",
-    "🇯": "17:00 - 18:00", "🇰": "18:00 - 19:00", "🇱": "19:00 - 20:00",
-    "🇲": "20:00 - 21:00", "🇳": "21:00 - 22:00", "🇴": "22:00 - 23:00",
-    "🇵": "23:00 - 23:59"
+    "🇦": "00:00 - 02:00", "🇧": "02:00 - 04:00", "🇨": "04:00 - 06:00",
+    "🇩": "06:00 - 08:00", "🇪": "08:00 - 10:00", "🇫": "10:00 - 12:00",
+    "🇬": "12:00 - 14:00", "🇭": "14:00 - 16:00", "🇮": "16:00 - 18:00",
+    "🇯": "18:00 - 20:00", "🇰": "20:00 - 22:00", "🇱": "22:00 - 00:00"
 }
 
-@bot.event
-async def on_ready():
-    print(f'Bot logado com sucesso como {bot.user}')
+# --- TAREFA AGENDADA: RESET DIÁRIO (00:00) ---
+horario_reset = datetime.time(hour=0, minute=0, tzinfo=FUSO_BR)
 
-# --- COMANDO PRINCIPAL: GERAR CARD ---
-@bot.command()
-async def pvp(ctx):
+@tasks.loop(time=horario_reset)
+async def rotina_diaria_pvp():
     canal = bot.get_channel(ID_CANAL_PVP)
-    if not canal:
-        await ctx.send("Erro: Não encontrei o canal configurado. Verifique o ID no código.")
-        return
+    if not canal: return
 
-    # Pega a data de hoje formatada
-    data_hoje = datetime.now().strftime('%d/%m/%Y')
+    # 1. Tenta apagar a mensagem do dia anterior para manter a organização
+    try:
+        doc_ref = db.collection('config').document('mensagem_ativa').get()
+        if doc_ref.exists:
+            msg_id = int(doc_ref.to_dict().get('mensagem_id'))
+            msg_antiga = await canal.fetch_message(msg_id)
+            await msg_antiga.delete()
+    except Exception as e:
+        print(f"Aviso ao limpar chat: {e}")
 
+    # 2. Gera a data do novo dia
+    data_hoje = datetime.datetime.now(FUSO_BR).strftime('%d/%m/%Y')
+
+    # 3. Cria o novo Card
     embed = discord.Embed(
         title=f"⚔️ PRESENÇA PVP MEGAMU - {data_hoje}",
         description="Clique nas reações abaixo para marcar os horários que você jogará hoje.",
@@ -82,29 +86,39 @@ async def pvp(ctx):
     for emoji, horario in HORARIOS.items():
         embed.add_field(name=f"{emoji} {horario}", value="Nenhum jogador", inline=True)
     
-    embed.set_footer(text=f"Lista gerada em: {data_hoje} | Gestão MEGAMU")
+    embed.set_footer(text=f"Lista gerada automaticamente | Gestão MEGAMU")
     
-    mensagem = await canal.send(embed=embed)
-    
-    # Se o comando for digitado em outro canal, avisa o líder que deu certo
-    if ctx.channel.id != ID_CANAL_PVP:
-        await ctx.send(f"✅ Card de presença gerado com sucesso no canal {canal.mention}!")
+    nova_mensagem = await canal.send(embed=embed)
 
-    # Adiciona todas as reações à mensagem nova
     for emoji in HORARIOS.keys():
-        await mensagem.add_reaction(emoji)
+        await nova_mensagem.add_reaction(emoji)
 
-    # Armazena os dados do card ativo no Firebase para o bot saber quem monitorar
+    # 4. Atualiza o banco de dados com a mensagem ativa do novo dia
     db.collection('config').document('mensagem_ativa').set({
-        'mensagem_id': str(mensagem.id),
+        'mensagem_id': str(nova_mensagem.id),
         'canal_id': str(canal.id),
         'data_evento': data_hoje
     })
 
+# Inicia a rotina agendada assim que o bot fica online
+@bot.event
+async def on_ready():
+    print(f'Bot logado com sucesso como {bot.user}')
+    if not rotina_diaria_pvp.is_running():
+        rotina_diaria_pvp.start()
+        print("Rotina de reset diário ativada.")
+
+# Mantive o comando manual caso você precise forçar a criação do Card alguma vez
+@bot.command()
+async def pvp(ctx):
+    await rotina_diaria_pvp()
+    if ctx.channel.id != ID_CANAL_PVP:
+        await ctx.send("✅ Card gerado manualmente.")
+
 # --- EVENTOS: ADICIONAR E REMOVER REAÇÃO ---
 @bot.event
 async def on_raw_reaction_add(payload):
-    if payload.user_id == bot.user.id: return # Ignora cliques do próprio bot
+    if payload.user_id == bot.user.id: return
     await processar_reacao(payload, adicionar=True)
 
 @bot.event
@@ -112,7 +126,6 @@ async def on_raw_reaction_remove(payload):
     await processar_reacao(payload, adicionar=False)
 
 async def processar_reacao(payload, adicionar):
-    # Confere se a mensagem clicada é o Card de PvP ativo
     doc_ref = db.collection('config').document('mensagem_ativa').get()
     if not doc_ref.exists or doc_ref.to_dict().get('mensagem_id') != str(payload.message_id):
         return
@@ -127,18 +140,13 @@ async def processar_reacao(payload, adicionar):
     canal = bot.get_channel(payload.channel_id)
     mensagem = await canal.fetch_message(payload.message_id)
     
-    # --- A MUDANÇA PRINCIPAL ESTÁ AQUI ---
-    # Busca o servidor (guild) e depois o membro específico dentro dele
     guild = bot.get_guild(payload.guild_id)
     membro = guild.get_member(payload.user_id)
     if not membro:
         membro = await guild.fetch_member(payload.user_id)
     
-    # O display_name de um 'Member' prioriza o Apelido no Servidor. 
-    # Se ele não tiver um apelido, cai pro nome global padrão automaticamente.
     nome_jogador = membro.display_name
     
-    # --- LÓGICA DE BANCO DE DADOS ---
     presenca_ref = db.collection('presencas_pvp').document(data_evento.replace('/', '-')).collection('slots').document(horario_selecionado)
     doc = presenca_ref.get()
     
@@ -151,7 +159,6 @@ async def processar_reacao(payload, adicionar):
         
     presenca_ref.set({'jogadores': jogadores})
 
-    # --- ATUALIZAÇÃO DO CARD NO DISCORD ---
     embed = mensagem.embeds[0]
     novo_embed = discord.Embed(title=embed.title, description=embed.description, color=embed.color)
     novo_embed.set_footer(text=embed.footer.text)
@@ -165,7 +172,6 @@ async def processar_reacao(payload, adicionar):
 
     await mensagem.edit(embed=novo_embed)
 
-# --- EXECUÇÃO DO BOT ---
-# O Token é puxado do arquivo .env ou das Variáveis de Ambiente do Render
+# --- EXECUÇÃO ---
 TOKEN = os.getenv('DISCORD_TOKEN')
 bot.run(TOKEN)
