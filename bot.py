@@ -9,6 +9,27 @@ from dotenv import load_dotenv
 # --- CARREGAR VARIÁVEIS DE AMBIENTE (Segurança) ---
 load_dotenv()
 
+# --- SISTEMA DE SERVIDOR WEB (Para o Render não derrubar o bot) ---
+import http.server
+import socketserver
+from threading import Thread
+
+def iniciar_servidor_web():
+    porta = int(os.environ.get('PORT', 8080))
+    class MeuHandler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b"Servidor do Bot Online")
+            
+    socketserver.TCPServer.allow_reuse_address = True
+    with socketserver.TCPServer(("", porta), MeuHandler) as httpd:
+        httpd.serve_forever()
+
+# Inicia o servidor web falso em segundo plano
+Thread(target=iniciar_servidor_web, daemon=True).start()
+
 # --- CONFIGURAÇÕES FIXAS ---
 # Substitua o número abaixo pelo ID real do canal de PvP do seu servidor
 ID_CANAL_PVP = 1513669911782883528 
