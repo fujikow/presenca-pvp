@@ -29,7 +29,7 @@ def iniciar_servidor_web():
 Thread(target=iniciar_servidor_web, daemon=True).start()
 
 # --- CONFIGURAÇÕES FIXAS ---
-ID_CANAL_PVP = 123456789012345678 # <--- LEMBRE-SE DE COLOCAR O SEU ID AQUI NOVAMENTE
+ID_CANAL_PVP = 1513669911782883528 # <--- LEMBRE-SE DE COLOCAR O SEU ID AQUI NOVAMENTE
 
 # Fuso horário do Brasil (UTC-3) para o reset diário
 FUSO_BR = datetime.timezone(datetime.timedelta(hours=-3))
