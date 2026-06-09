@@ -50,9 +50,12 @@ HORARIOS = {
     "🇯": "18:00 - 20:00", "🇰": "20:00 - 22:00", "🇱": "22:00 - 00:00"
 }
 
-# --- FUNÇÃO DE SINCRONIZAÇÃO (ACORDA E ATUALIZA) ---
+# Variável Global para controlar o lote de atualizações
+atualizacao_pendente = False
+
+# --- FUNÇÃO DE ATUALIZAÇÃO EM MASSA ---
 async def sincronizar_reacoes():
-    print("Verificando se há perda de dados... Sincronizando Card ativo.")
+    print("Aplicando lote de reações no Card e Firebase...")
     doc_ref = db.collection('config').document('mensagem_ativa').get()
     if not doc_ref.exists: return
 
@@ -92,9 +95,21 @@ async def sincronizar_reacoes():
         novo_embed.add_field(name=f"{emoji_str} {horario} ({len(jogadores)})", value=texto_jogadores, inline=True)
 
     await mensagem.edit(content=mensagem.content, embed=novo_embed)
-    print("Sincronização concluída com sucesso!")
 
 # --- ROTINAS E EVENTOS ---
+
+# 1. Rotina de Otimização Antispam do Discord (A cada 15 segundos)
+@tasks.loop(seconds=15)
+async def otimizador_de_edicoes():
+    global atualizacao_pendente
+    # Se ninguém clicou nos últimos 15 segundos, o bot descansa e não gasta a API
+    if not atualizacao_pendente: return
+    
+    # Se alguém clicou, ele reseta a trava e atualiza tudo de uma vez
+    atualizacao_pendente = False
+    await sincronizar_reacoes()
+
+# 2. Rotina de Reset Diário
 horario_reset = datetime.time(hour=0, minute=0, tzinfo=FUSO_BR)
 
 @tasks.loop(time=horario_reset)
@@ -113,7 +128,6 @@ async def rotina_diaria_pvp():
 
     data_hoje = datetime.datetime.now(FUSO_BR).strftime('%d/%m/%Y')
 
-    # A cor já está ajustada aqui para o Azul do Grêmio (0x005CA9) que você utiliza
     embed = discord.Embed(
         title=f"⚔️ PRESENÇA PVP MEGAMU - {data_hoje}",
         description="Clique nas reações abaixo para marcar os horários que você jogará hoje.",
@@ -141,12 +155,14 @@ async def rotina_diaria_pvp():
 async def on_ready():
     print(f'Bot logado com sucesso como {bot.user}')
     
-    # Executa a proteção contra perda de dados
     await sincronizar_reacoes()
     
     if not rotina_diaria_pvp.is_running():
         rotina_diaria_pvp.start()
-        print("Rotina de reset diário ativada.")
+        
+    # Liga o sistema de lote automático
+    if not otimizador_de_edicoes.is_running():
+        otimizador_de_edicoes.start()
 
 @bot.command()
 async def pvp(ctx):
@@ -154,18 +170,19 @@ async def pvp(ctx):
     if ctx.channel.id != ID_CANAL_PVP:
         await ctx.send("✅ Card gerado manualmente com a marcação do cargo.")
 
-# --- EVENTOS: ADICIONAR E REMOVER REAÇÃO ---
+# --- EVENTOS DE CLIQUE OTIMIZADOS ---
 @bot.event
 async def on_raw_reaction_add(payload):
     if payload.user_id == bot.user.id: return
-    await processar_reacao(payload)
+    await agendar_atualizacao(payload)
 
 @bot.event
 async def on_raw_reaction_remove(payload):
-    await processar_reacao(payload)
+    await agendar_atualizacao(payload)
 
-# Lógica unificada: Lê o Discord e escreve no Firebase (Espelho de segurança)
-async def processar_reacao(payload):
+async def agendar_atualizacao(payload):
+    global atualizacao_pendente
+    
     doc_ref = db.collection('config').document('mensagem_ativa').get()
     if not doc_ref.exists or doc_ref.to_dict().get('mensagem_id') != str(payload.message_id):
         return
@@ -173,39 +190,8 @@ async def processar_reacao(payload):
     emoji_usado = str(payload.emoji)
     if emoji_usado not in HORARIOS: return
 
-    dados_config = doc_ref.to_dict()
-    horario_selecionado = HORARIOS[emoji_usado]
-    data_evento = dados_config.get('data_evento', 'Sem Data')
-    
-    canal = bot.get_channel(payload.channel_id)
-    mensagem = await canal.fetch_message(payload.message_id)
-    guild = bot.get_guild(payload.guild_id)
-    
-    jogadores = []
-    reacao_real = discord.utils.get(mensagem.reactions, emoji=emoji_usado)
-    
-    if reacao_real:
-        async for user in reacao_real.users():
-            if user.id == bot.user.id: continue 
-            membro = guild.get_member(user.id) or await guild.fetch_member(user.id)
-            if membro:
-                jogadores.append(membro.display_name)
-    
-    presenca_ref = db.collection('presencas_pvp').document(data_evento.replace('/', '-')).collection('slots').document(horario_selecionado)
-    presenca_ref.set({'jogadores': jogadores})
-
-    embed = mensagem.embeds[0]
-    novo_embed = discord.Embed(title=embed.title, description=embed.description, color=embed.color)
-    novo_embed.set_footer(text=embed.footer.text)
-
-    for index, (emoji, horario) in enumerate(HORARIOS.items()):
-        if horario == horario_selecionado:
-            texto_jogadores = "\n".join(jogadores) if jogadores else "Nenhum jogador"
-            novo_embed.add_field(name=f"{emoji} {horario} ({len(jogadores)})", value=texto_jogadores, inline=True)
-        else:
-            novo_embed.add_field(name=embed.fields[index].name, value=embed.fields[index].value, inline=True)
-
-    await mensagem.edit(content=mensagem.content, embed=novo_embed)
+    # Apenas avisa a fila de otimização que o painel precisa ser recalculado em breve
+    atualizacao_pendente = True
 
 # --- EXECUÇÃO ---
 TOKEN = os.getenv('DISCORD_TOKEN')
