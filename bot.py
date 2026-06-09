@@ -28,7 +28,7 @@ Thread(target=iniciar_servidor_web, daemon=True).start()
 
 # --- CONFIGURAÇÕES FIXAS ---
 ID_CANAL_PVP = 1513669911782883528 
-ID_CARGO_BATTLE = 1487988014792708226 # Mantenha o ID real do seu cargo aqui
+ID_CARGO_BATTLE = 1487988014792708226 
 
 FUSO_BR = datetime.timezone(datetime.timedelta(hours=-3))
 
@@ -50,7 +50,7 @@ HORARIOS = {
     "🇯": "18:00 - 20:00", "🇰": "20:00 - 22:00", "🇱": "22:00 - 00:00"
 }
 
-# --- FUNÇÃO DE SINCRONIZAÇÃO (NOVO) ---
+# --- FUNÇÃO DE SINCRONIZAÇÃO (ACORDA E ATUALIZA) ---
 async def sincronizar_reacoes():
     print("Verificando se há perda de dados... Sincronizando Card ativo.")
     doc_ref = db.collection('config').document('mensagem_ativa').get()
@@ -67,30 +67,27 @@ async def sincronizar_reacoes():
     try:
         mensagem = await canal.fetch_message(msg_id)
     except discord.NotFound:
-        return # Se a mensagem foi apagada, não faz nada
+        return 
 
     guild = mensagem.guild
     embed = mensagem.embeds[0]
     novo_embed = discord.Embed(title=embed.title, description=embed.description, color=embed.color)
     novo_embed.set_footer(text=embed.footer.text)
 
-    # Varre todos os horários e verifica quem clicou na mensagem real do Discord
     for emoji_str, horario in HORARIOS.items():
         jogadores = []
         reacao = discord.utils.get(mensagem.reactions, emoji=emoji_str)
         
         if reacao:
             async for user in reacao.users():
-                if user.id == bot.user.id: continue # Ignora o bot
+                if user.id == bot.user.id: continue 
                 membro = guild.get_member(user.id) or await guild.fetch_member(user.id)
                 if membro:
                     jogadores.append(membro.display_name)
         
-        # Sobrescreve o banco de dados com a realidade atual do Discord
         presenca_ref = db.collection('presencas_pvp').document(data_evento.replace('/', '-')).collection('slots').document(horario)
         presenca_ref.set({'jogadores': jogadores})
 
-        # Recria o campo com os números corretos
         texto_jogadores = "\n".join(jogadores) if jogadores else "Nenhum jogador"
         novo_embed.add_field(name=f"{emoji_str} {horario} ({len(jogadores)})", value=texto_jogadores, inline=True)
 
@@ -116,6 +113,7 @@ async def rotina_diaria_pvp():
 
     data_hoje = datetime.datetime.now(FUSO_BR).strftime('%d/%m/%Y')
 
+    # A cor já está ajustada aqui para o Azul do Grêmio (0x005CA9) que você utiliza
     embed = discord.Embed(
         title=f"⚔️ PRESENÇA PVP MEGAMU - {data_hoje}",
         description="Clique nas reações abaixo para marcar os horários que você jogará hoje.",
@@ -143,7 +141,7 @@ async def rotina_diaria_pvp():
 async def on_ready():
     print(f'Bot logado com sucesso como {bot.user}')
     
-    # Chama a função de sincronizar assim que o bot acorda
+    # Executa a proteção contra perda de dados
     await sincronizar_reacoes()
     
     if not rotina_diaria_pvp.is_running():
@@ -156,16 +154,18 @@ async def pvp(ctx):
     if ctx.channel.id != ID_CANAL_PVP:
         await ctx.send("✅ Card gerado manualmente com a marcação do cargo.")
 
+# --- EVENTOS: ADICIONAR E REMOVER REAÇÃO ---
 @bot.event
 async def on_raw_reaction_add(payload):
     if payload.user_id == bot.user.id: return
-    await processar_reacao(payload, adicionar=True)
+    await processar_reacao(payload)
 
 @bot.event
 async def on_raw_reaction_remove(payload):
-    await processar_reacao(payload, adicionar=False)
+    await processar_reacao(payload)
 
-async def processar_reacao(payload, adicionar):
+# Lógica unificada: Lê o Discord e escreve no Firebase (Espelho de segurança)
+async def processar_reacao(payload):
     doc_ref = db.collection('config').document('mensagem_ativa').get()
     if not doc_ref.exists or doc_ref.to_dict().get('mensagem_id') != str(payload.message_id):
         return
@@ -179,24 +179,19 @@ async def processar_reacao(payload, adicionar):
     
     canal = bot.get_channel(payload.channel_id)
     mensagem = await canal.fetch_message(payload.message_id)
-    
     guild = bot.get_guild(payload.guild_id)
-    membro = guild.get_member(payload.user_id)
-    if not membro:
-        membro = await guild.fetch_member(payload.user_id)
     
-    nome_jogador = membro.display_name
+    jogadores = []
+    reacao_real = discord.utils.get(mensagem.reactions, emoji=emoji_usado)
+    
+    if reacao_real:
+        async for user in reacao_real.users():
+            if user.id == bot.user.id: continue 
+            membro = guild.get_member(user.id) or await guild.fetch_member(user.id)
+            if membro:
+                jogadores.append(membro.display_name)
     
     presenca_ref = db.collection('presencas_pvp').document(data_evento.replace('/', '-')).collection('slots').document(horario_selecionado)
-    doc = presenca_ref.get()
-    
-    jogadores = doc.to_dict().get('jogadores', []) if doc.exists else []
-
-    if adicionar and nome_jogador not in jogadores:
-        jogadores.append(nome_jogador)
-    elif not adicionar and nome_jogador in jogadores:
-        jogadores.remove(nome_jogador)
-        
     presenca_ref.set({'jogadores': jogadores})
 
     embed = mensagem.embeds[0]
@@ -212,5 +207,6 @@ async def processar_reacao(payload, adicionar):
 
     await mensagem.edit(content=mensagem.content, embed=novo_embed)
 
+# --- EXECUÇÃO ---
 TOKEN = os.getenv('DISCORD_TOKEN')
 bot.run(TOKEN)
