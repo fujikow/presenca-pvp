@@ -28,9 +28,7 @@ Thread(target=iniciar_servidor_web, daemon=True).start()
 
 # --- CONFIGURAÇÕES FIXAS ---
 ID_CANAL_PVP = 1513669911782883528 
-
-# Lembre-se de manter o ID real do seu cargo @battle aqui
-ID_CARGO_BATTLE = 1487988014792708226 
+ID_CARGO_BATTLE = 1487988014792708226 # Mantenha o ID real do seu cargo aqui
 
 FUSO_BR = datetime.timezone(datetime.timedelta(hours=-3))
 
@@ -52,6 +50,54 @@ HORARIOS = {
     "🇯": "18:00 - 20:00", "🇰": "20:00 - 22:00", "🇱": "22:00 - 00:00"
 }
 
+# --- FUNÇÃO DE SINCRONIZAÇÃO (NOVO) ---
+async def sincronizar_reacoes():
+    print("Verificando se há perda de dados... Sincronizando Card ativo.")
+    doc_ref = db.collection('config').document('mensagem_ativa').get()
+    if not doc_ref.exists: return
+
+    dados = doc_ref.to_dict()
+    canal_id = int(dados.get('canal_id', 0))
+    msg_id = int(dados.get('mensagem_id', 0))
+    data_evento = dados.get('data_evento', 'Sem Data')
+
+    canal = bot.get_channel(canal_id)
+    if not canal: return
+
+    try:
+        mensagem = await canal.fetch_message(msg_id)
+    except discord.NotFound:
+        return # Se a mensagem foi apagada, não faz nada
+
+    guild = mensagem.guild
+    embed = mensagem.embeds[0]
+    novo_embed = discord.Embed(title=embed.title, description=embed.description, color=embed.color)
+    novo_embed.set_footer(text=embed.footer.text)
+
+    # Varre todos os horários e verifica quem clicou na mensagem real do Discord
+    for emoji_str, horario in HORARIOS.items():
+        jogadores = []
+        reacao = discord.utils.get(mensagem.reactions, emoji=emoji_str)
+        
+        if reacao:
+            async for user in reacao.users():
+                if user.id == bot.user.id: continue # Ignora o bot
+                membro = guild.get_member(user.id) or await guild.fetch_member(user.id)
+                if membro:
+                    jogadores.append(membro.display_name)
+        
+        # Sobrescreve o banco de dados com a realidade atual do Discord
+        presenca_ref = db.collection('presencas_pvp').document(data_evento.replace('/', '-')).collection('slots').document(horario)
+        presenca_ref.set({'jogadores': jogadores})
+
+        # Recria o campo com os números corretos
+        texto_jogadores = "\n".join(jogadores) if jogadores else "Nenhum jogador"
+        novo_embed.add_field(name=f"{emoji_str} {horario} ({len(jogadores)})", value=texto_jogadores, inline=True)
+
+    await mensagem.edit(content=mensagem.content, embed=novo_embed)
+    print("Sincronização concluída com sucesso!")
+
+# --- ROTINAS E EVENTOS ---
 horario_reset = datetime.time(hour=0, minute=0, tzinfo=FUSO_BR)
 
 @tasks.loop(time=horario_reset)
@@ -76,7 +122,6 @@ async def rotina_diaria_pvp():
         color=0x005CA9 
     )
     
-    # Inicia todos os blocos com o contador em (0)
     for emoji, horario in HORARIOS.items():
         embed.add_field(name=f"{emoji} {horario} (0)", value="Nenhum jogador", inline=True)
     
@@ -97,6 +142,10 @@ async def rotina_diaria_pvp():
 @bot.event
 async def on_ready():
     print(f'Bot logado com sucesso como {bot.user}')
+    
+    # Chama a função de sincronizar assim que o bot acorda
+    await sincronizar_reacoes()
+    
     if not rotina_diaria_pvp.is_running():
         rotina_diaria_pvp.start()
         print("Rotina de reset diário ativada.")
@@ -150,18 +199,15 @@ async def processar_reacao(payload, adicionar):
         
     presenca_ref.set({'jogadores': jogadores})
 
-    embed = message_embed = mensagem.embeds[0]
+    embed = mensagem.embeds[0]
     novo_embed = discord.Embed(title=embed.title, description=embed.description, color=embed.color)
     novo_embed.set_footer(text=embed.footer.text)
 
-    # Reconstrói os campos exibindo a soma acumulada atualizada
     for index, (emoji, horario) in enumerate(HORARIOS.items()):
         if horario == horario_selecionado:
             texto_jogadores = "\n".join(jogadores) if jogadores else "Nenhum jogador"
-            # Adiciona o len(jogadores) no título do bloco modificado
             novo_embed.add_field(name=f"{emoji} {horario} ({len(jogadores)})", value=texto_jogadores, inline=True)
         else:
-            # Mantém o título dos outros blocos intactos (eles já contêm suas respectivas contagens)
             novo_embed.add_field(name=embed.fields[index].name, value=embed.fields[index].value, inline=True)
 
     await mensagem.edit(content=mensagem.content, embed=novo_embed)
